@@ -92,6 +92,7 @@ def ingest_data():
         # Save data to S3
         s3_hook.load_string(csv_data, bucket_name=AWS_SOURCE_SYNC_ZONE_PATH, key='your_file_name.csv', replace=True)
 
+    # Trav=sferir aquivo
     transfer_task = PythonOperator(
         task_id='transfer_data',
         python_callable=transfer_data_to_s3,
