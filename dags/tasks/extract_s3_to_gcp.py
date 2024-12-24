@@ -1,9 +1,18 @@
 import os
 from datetime import datetime, timedelta, date
+
+import sys
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.append(os.path.dirname(SCRIPT_DIR))
+
+from dags.models.TransformToSilver import TransformToSilver
+from dags.utils.common import *
+
 from airflow.decorators import dag, task
 from airflow.models.baseoperator import chain
-from airflow.operators.dummy import DummyOperator
+from airflow.operators.empty import EmptyOperator
 from airflow.utils.task_group import TaskGroup
+from airflow import Dataset
 
 from astro import sql as aql
 from astro.constants import FileType
@@ -20,6 +29,9 @@ from airflow.operators.python import PythonOperator
 from airflow.providers.google.cloud.transfers.postgres_to_gcs import PostgresToGCSOperator
 from airflow.providers.google.cloud.operators.gcs import GCSDeleteObjectsOperator
 from airflow.providers.amazon.aws.operators.s3 import S3CreateBucketOperator
+from astronomer.providers.snowflake.operators.snowflake import SnowflakeOperatorAsync
+from airflow.providers.amazon.aws.operators.s3 import S3ListOperator
+from airflow.providers.snowflake.transfers.s3_to_snowflake import S3ToSnowflakeOperator
 
 AWS_SOURCE_SYNC_ZONE_PATH = "s3-dev-datamaster"
 GCP_LANDING_BUCKET_PATH = "gcp-brsp-dev-datamaster"
@@ -28,7 +40,13 @@ GCP_DEST_SYNC_ZONE_PATH = f"estados/raw/dt_ingest_{date.today()}"
 AWS_CONN_ID = "aws_default"
 GCS_CONN_ID = "google_cloud_default"
 POSTGRES_CONN_ID = "postgres"
+SNOWFLAKE_CONN_ID = "snowflake_default"
 WAIT_FOR_OPERATION_POKE_INTERVAL = int(os.environ.get("WAIT_FOR_OPERATION_POKE_INTERVAL", 5))
+
+
+S3_BUCKET = AWS_SOURCE_SYNC_ZONE_PATH  # Substitua pelo seu bucket S3
+S3_KEY_INPUT = f"veiculos/bronze/dt_ingest_{date.today()}.json" # Caminho para o arquivo de entrada no S3
+S3_KEY_OUTPUT = f"veiculos/silver/dt_ingest_{date.today()}.json" # Caminho para o arquivo de saída no S3
 
 # default args & init dag
 current_date = datetime.now()
@@ -36,6 +54,8 @@ get_year = current_date.year
 get_month = current_date.month
 get_day = current_date.day
 get_hour = current_date.hour
+
+silver = TransformToSilver
 
 default_args = {
     "owner": "duque",
@@ -58,117 +78,43 @@ def ingest_data():
     # set tasks
 
     # init
-    init = DummyOperator(task_id="init")
-
-    # transfer_postgres_to_gcs = PostgresToGCSOperator(
-    #     task_id="transfer_postgres_to_gcs",
-    #     sql="SELECT * FROM public.estados",
-	#     bucket=GCP_LANDING_BUCKET_PATH,
-	#     filename=f"{GCP_DEST_SYNC_ZONE_PATH}.parquet",
-	#     export_format="parquet",
-	#     gzip=False,
-	#     gcp_conn_id=GCS_CONN_ID,
-	#     postgres_conn_id=POSTGRES_CONN_ID,
-    # )
-    
-    
-  
-    # export_file_to_gcs = aql.export_to_file(
-    #     task_id="transfer_postgresFile_to_s3",
-    #     input_data=postgres_table,
-    #     output_file=File(
-    #         path=f"s3://s3-dev-datamaster/vendedores/bronze/dt_ingest_{date.today()}.parquet",
-    #         conn_id=AWS_CONN_ID,
-    #         filetype=FileType.PARQUET
-    #     ),
-    #     if_exists="replace"
-    # )
-   
+    init = EmptyOperator(task_id="init")
       
     with TaskGroup("extract_data") as task_group_storage_s3:
-        tabelas = ["cidades","clientes","concessionarias","estados","fluxo","op_faturamento","veiculos","vendas","vendedores"]
+        tabelas = ["cidades","concessionarias","estados"]
 
         for tabela in tabelas:
             postgres_table = Table(name=tabela, conn_id=POSTGRES_CONN_ID, metadata=Metadata(schema="public"))
-            path =  f"s3://s3-dev-datamaster/{tabela}/bronze/dt_ingest_{date.today()}.parquet"
+            path =  f"s3://s3-dev-datamaster/{tabela}/bronze/dt_ingest_{date.today()}.json"
             aql.export_to_file(
                 task_id=tabela,
                 input_data=postgres_table,
                 output_file=File(path,
                     conn_id=AWS_CONN_ID,
-                    filetype=FileType.PARQUET
+                    filetype=FileType.JSON
                 ),
                 if_exists="replace"
             )
-        
 
-    # carregar dados em dataframe
-    # dataframe = aql.load_file(
-    #     task_id="gcs_to_dataframe",
-    #     input_file=File(path="gs://gcp-brsp-dev-datamaster/estados/raw/dt_ingest_2024-12-11.parquet"),
-    # )
+    with TaskGroup("carregar_tabela") as carregar_tabela_to_db:
+        tabelas =  ["cidades","concessionarias","estados"]
+        carregar_tabela(tabelas,POSTGRES_CONN_ID,AWS_CONN_ID)
+
+    with TaskGroup("salvar_tabela_s3") as salvar_tabela_to_s3:
+        tabelas =  ["cidades","concessionarias","estados"]
+        salvar_tabela_s3(tabelas,POSTGRES_CONN_ID)
+
+    with TaskGroup("export_table_to_s3") as exportar_tabela_silver_s3:
+        tabelas =  ["cidades","concessionarias","estados"]
+        export_table_to_s3(tabelas,POSTGRES_CONN_ID,AWS_CONN_ID)
     
-    # def column(df):
-    #     df['dt_ingest']
-    #     print("##############",df, "################")
-    #     return df
+    with TaskGroup("export_table_to_snowflake") as export_tabela_to_snowflake:
+        tabelas =  ["cidades","concessionarias","estados"]
+        export_table_to_snowflake(tabelas,AWS_CONN_ID,SNOWFLAKE_CONN_ID)
 
-    # test_to_broze = aql.export_file(
-    #         task_id="save_dataframe_to_gcs",
-    #         input_data=column(dataframe),
-    #         output_file=File(
-    #             path="gs://gcp-brsp-dev-datamaster/estados/siver/dt_ingest_2024-12-11.parquet",
-    #             conn_id=GCS_CONN_ID,
-    #         ),
-    #         if_exists="replace",
-    #     )
-
-    # delete_file_task = GCSDeleteObjectsOperator(
-    #     task_id='delete_file_from_gcs',
-    #     bucket_name=GCP_LANDING_BUCKET_PATH,
-    #     objects=[f"{GCP_DEST_SYNC_ZONE_PATH}"],
-    #     gcp_conn_id=GCS_CONN_ID
-    # )
-
-    # def transfer_data_to_s3(**kwargs):
-    #     postgres_hook = PostgresHook(postgres_conn_id=POSTGRES_CONN_ID)
-    #     s3_hook = S3Hook(aws_conn_id=AWS_CONN_ID)
-        
-    #     # Fetch data from Postgres
-    #     query = "SELECT * FROM public.cidades;"
-    #     records = postgres_hook.get_records(query)
-        
-    #     # Process records and convert to desired format (e.g., CSV)
-    #     csv_data = '\n'.join([','.join(map(str, record)) for record in records])
-        
-    #     # Save data to S3
-    #     s3_hook.load_string(csv_data, bucket_name=AWS_SOURCE_SYNC_ZONE_PATH, key='your_file_name.csv', replace=True)
-
-    # # Trav=sferir aquivo
-    # transfer_task = PythonOperator(
-    #     task_id='transfer_data',
-    #     python_callable=load_data,
-    #     provide_context=True,
-    # )
-
-    # s3 to gcs = user
-    # sync_s3_to_gcs_user_json_files = S3ToGCSOperator(
-    #     task_id="sync_s3_to_gcs_user_json_files",
-    #     bucket=AWS_SOURCE_SYNC_ZONE_PATH,
-    #     prefix="cadastro/",
-    #     dest_gcs="gs://gcp-brsp-dev-datamaster",
-    #     replace=False,
-    #     gzip=False,
-    # )
-
-
-    # # create bucket for processing
-    create_processing_bucket = GCSCreateBucketOperator(
-    task_id="create_processing_bucket",
-    bucket_name=GCP_PROCESSING_BUCKET_PATH,
-    storage_class="REGIONAL",
-    location="US-EAST1"
-    )
+    with TaskGroup("drop_table_tmp") as drop_tabela_temporaria:
+        tabelas =  ["cidades","concessionarias","estados"]
+        drop_table_tmp(tabelas,POSTGRES_CONN_ID) 
 
     create_bucket_grant_full_control = S3CreateBucketOperator(
         task_id="create_s3_bucket_grant_full_control",
@@ -178,10 +124,18 @@ def ingest_data():
     )
 
     # finish
-    finish = DummyOperator(task_id="finish")
+    finish = EmptyOperator(task_id="finish")
 
     # define sequence
-    chain(init, create_processing_bucket, task_group_storage_s3, create_bucket_grant_full_control, finish)
+    chain(init,
+          create_bucket_grant_full_control, 
+          task_group_storage_s3,
+          carregar_tabela_to_db,
+          salvar_tabela_to_s3,
+          exportar_tabela_silver_s3,
+          [export_tabela_to_snowflake, drop_tabela_temporaria],
+          finish
+    )
 
 
 # init dag

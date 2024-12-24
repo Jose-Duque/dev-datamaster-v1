@@ -1,10 +1,57 @@
-version: "3"
+version: "3.9" # Ou versão superior do Docker Compose
 services:
-  dcs-postgres:
-    image: postgres:15.3-alpine
-    container_name: dcs-postgres
-    environment:
-      POSTGRES_PASSWORD: password
-      POSTGRES_USER: postgres
+  spark-master:
+    build: . # Constrói a imagem a partir do Dockerfile no diretório atual
     ports:
-      - 5432:5432
+      - "8080:8080" # UI do Spark Master
+      - "7077:7077" # Porta para os workers se conectarem
+      - "4040:4040" # Porta da UI da aplicação Spark (opcional)
+    environment:
+      SPARK_MODE: master
+      SPARK_DRIVER_MEMORY: 1g
+      SPARK_EXECUTOR_MEMORY: 1g
+    command: ["./bin/spark-class", "org.apache.spark.deploy.master.Master"]
+    volumes:
+      - ./data:/opt/spark/data # Monta um volume para persistência de dados (opcional)
+    deploy:
+        resources:
+          limits:
+            cpus: '1'
+            memory: 2G
+  spark-worker-1:
+    build: .
+    ports:
+      - "4041:4040" # Porta da UI da aplicação Spark (opcional)
+    environment:
+      SPARK_MODE: worker
+      SPARK_MASTER_URL: spark://spark-master:7077
+      SPARK_WORKER_MEMORY: 1g
+      SPARK_DRIVER_MEMORY: 1g
+      SPARK_EXECUTOR_MEMORY: 1g
+    depends_on:
+      - spark-master
+    command: ["./bin/spark-class", "org.apache.spark.deploy.worker.Worker", "spark://spark-master:7077"]
+    deploy:
+        resources:
+          limits:
+            cpus: '1'
+            memory: 2G
+  # Adicione mais workers conforme necessário, copiando e incrementando o número:
+  spark-worker-2:
+    build: .
+    ports:
+      - "4042:4040" # Porta da UI da aplicação Spark (opcional)
+    environment:
+      SPARK_MODE: worker
+      SPARK_MASTER_URL: spark://spark-master:7077
+      SPARK_WORKER_MEMORY: 1g
+      SPARK_DRIVER_MEMORY: 1g
+      SPARK_EXECUTOR_MEMORY: 1g
+    depends_on:
+      - spark-master
+    command: ["./bin/spark-class", "org.apache.spark.deploy.worker.Worker", "spark://spark-master:7077"]
+    deploy:
+        resources:
+          limits:
+            cpus: '1'
+            memory: 2G
