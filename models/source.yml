@@ -1,0 +1,14 @@
+version: 2
+
+sources:
+    - name: sources
+      database: datamaster
+      schema: STAGE
+      tables:
+        - name: silver_cidades
+        - name: silver_clientes
+        - name: silver_concessionarias
+        - name: silver_estados
+        - name: silver_veiculos
+        - name: silver_vendas
+        - name: silver_vendedores
